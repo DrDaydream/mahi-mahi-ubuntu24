@@ -15,18 +15,19 @@ def test_missing_manifest_demands_install(tmp_path):
 
 def test_changed_binary_is_rejected(tmp_path):
     from mahi_aws.build import verify_build
-    from mahi_aws.settings import COMMIT, RUSTFLAGS, RUST_TOOLCHAIN
+    from mahi_aws.settings import REPOSITORY, RUSTFLAGS, RUST_TOOLCHAIN
+    provenance={'commit':'a'*40,'repository':REPOSITORY}
     binary=tmp_path/'target/release/mysticeti'
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b'original')
     binary.chmod(0o755)
-    record={'commit':COMMIT,'rust_toolchain':RUST_TOOLCHAIN,'rustflags':RUSTFLAGS,
+    record={**provenance,'adversary_schema':1,'rust_toolchain':RUST_TOOLCHAIN,'rustflags':RUSTFLAGS,
             'sha256':hashlib.sha256(b'original').hexdigest()}
     (tmp_path/'.mahi-build.json').write_text(json.dumps(record))
-    assert verify_build(tmp_path)==record
+    assert verify_build(tmp_path, provenance)==record
     binary.write_bytes(b'modified')
     with pytest.raises(RuntimeError,match='fab install'):
-        verify_build(tmp_path)
+        verify_build(tmp_path, provenance)
 
 
 def test_build_failure_clears_previous_manifest(tmp_path):
@@ -39,6 +40,13 @@ def test_build_failure_clears_previous_manifest(tmp_path):
     subprocess.run(['git','-C',str(source),'-c','user.name=test','-c','user.email=test@example.invalid',
                     'commit','--allow-empty','-m','fixture'],check=True,capture_output=True)
     sha=subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD'],text=True).strip()
+    module=source/'crates/mysticeti-core/src/adversary.rs'
+    module.parent.mkdir(parents=True)
+    module.write_text('// attack fixture')
+    subprocess.run(['git','-C',str(source),'add','.'],check=True,capture_output=True)
+    subprocess.run(['git','-C',str(source),'-c','user.name=test','-c','user.email=test@example.invalid','commit','-m','attack'],check=True,capture_output=True)
+    subprocess.run(['git','-C',str(source),'remote','add','origin',source.as_posix()],check=True,capture_output=True)
+    sha=subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD'],text=True).strip()
     record=source/'.mahi-build.json'
     record.write_text('previous successful build')
     fakebin=tmp_path/'bin'; fakebin.mkdir()
@@ -46,7 +54,7 @@ def test_build_failure_clears_previous_manifest(tmp_path):
     cargo.chmod(0o755)
     script=Path(__file__).parents[1]/'scripts/build_node.sh'
     env=dict(os.environ,PATH=f'{fakebin.as_posix()}{os.pathsep}{os.environ["PATH"]}')
-    result=subprocess.run([str(bash),script.as_posix(),source.as_posix(),sha,'2'],env=env,capture_output=True,text=True)
+    result=subprocess.run([str(bash),script.as_posix(),source.as_posix(),sha,'2',source.as_posix()],env=env,capture_output=True,text=True)
     assert 'COMPILER_FAILED' in result.stderr, result.stderr
     assert result.returncode != 0
     assert not record.exists()
@@ -56,7 +64,7 @@ def test_fresh_source_sync_materializes_checkout_and_preserves_user_edits(tmp_pa
     bash = Path('C:/Program Files/Git/bin/bash.exe') if os.name == 'nt' else Path('/bin/bash')
     if not bash.exists(): pytest.skip('bash unavailable')
     origin=tmp_path/'origin'; origin.mkdir()
-    subprocess.run(['git','init','-b','consensus-rework',str(origin)],check=True,capture_output=True)
+    subprocess.run(['git','init','-b','attack-branch',str(origin)],check=True,capture_output=True)
     (origin/'tracked.txt').write_text('original')
     subprocess.run(['git','-C',str(origin),'add','tracked.txt'],check=True,capture_output=True)
     subprocess.run(['git','-C',str(origin),'-c','user.name=test','-c','user.email=test@example.invalid',

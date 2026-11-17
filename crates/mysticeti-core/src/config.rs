@@ -33,6 +33,8 @@ pub trait ImportExport: Serialize + DeserializeOwned {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeParameters {
+    #[serde(default)]
+    pub adversary: crate::adversary::AdversaryConfig,
     #[serde(default = "node_defaults::default_wave_length")]
     pub wave_length: RoundNumber,
     #[serde(default = "node_defaults::default_leader_timeout")]
@@ -95,6 +97,7 @@ pub mod node_defaults {
 impl Default for NodeParameters {
     fn default() -> Self {
         Self {
+            adversary: Default::default(),
             wave_length: node_defaults::default_wave_length(),
             leader_timeout: node_defaults::default_leader_timeout(),
             max_block_size: node_defaults::default_max_block_size(),

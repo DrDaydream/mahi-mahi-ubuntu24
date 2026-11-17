@@ -1,4 +1,4 @@
-"""Install once; run fixed-version Mahi-Mahi experiments without rebuilding."""
+"""Install a resolved source commit; run Mahi-Mahi experiments without rebuilding."""
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import csv
@@ -19,7 +19,8 @@ import yaml
 from .build import verification_script, verify_build
 from .cloud import Cloud
 from .metrics import parse_snapshot, summarize
-from .settings import COMMIT, load_allocation, validate_benchmark
+from .settings import ADVERSARY_DEFAULTS, load_allocation, validate_benchmark
+from .source import resolve_source
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1]
 
@@ -43,11 +44,14 @@ def generate_config(binary, ips, output, remote_directory, parameters):
     for i, row in enumerate(public['identifiers']):
         if row['network_address'] != f'{ips[i]}:{1500+i}' or row['metrics_address'] != f'{ips[i]}:{1500+n+i}':
             raise ValueError('Unexpected genesis ports; refusing to start')
+    if parameters['adversary']['mode'] != 'A0' and not set(ADVERSARY_DEFAULTS).issubset(public['parameters'].get('adversary', {})):
+        raise RuntimeError('Binary genesis lacks adversary support. Run fab install first.')
+    public['parameters']['adversary'] = parameters['adversary']
     timeout = parameters['leader_timeout_ms']
     public['parameters'].update(
         wave_length=parameters['wave_length'], number_of_leaders=parameters['leaders'],
         leader_timeout={'secs': timeout // 1000, 'nanos': timeout % 1000 * 1000000},
-        consensus_only=True, enable_synchronizer=True, enable_pipelining=True)
+        consensus_only=True, enable_synchronizer=parameters['enable_synchronizer'], enable_pipelining=True)
     path.write_text(yaml.safe_dump(public, sort_keys=False), encoding='utf-8')
     allocation = load_allocation(parameters['rate'], n, parameters['faults'])
     client = {'load': allocation['per_node_tps'], 'transaction_size': parameters['tx_size'],
@@ -63,12 +67,26 @@ def generate_config(binary, ips, output, remote_directory, parameters):
 class Runner:
     def __init__(self, settings, cloud=None, results_dir=None):
         self.settings = settings
-        self.cloud = cloud if cloud is not None else Cloud(settings)
+        self._cloud = cloud
+        self.provenance = {}
         self.source = Path(settings['remote']['source_dir'])
         self.binary = self.source / 'target/release/mysticeti'
         self.results_dir = Path(results_dir or PACKAGE_DIR / 'results')
         self.socket = 'mahi-' + hashlib.sha256(settings['testbed_id'].encode()).hexdigest()[:12]
         self._key = None
+
+    @property
+    def cloud(self):
+        if self._cloud is None:
+            self._cloud = Cloud(self.settings)
+        return self._cloud
+
+    def _resolve_source(self):
+        checkout = PACKAGE_DIR.parent.resolve()
+        source = self.source.resolve()
+        if source == checkout or source in checkout.parents or checkout in source.parents:
+            raise ValueError('remote.source_dir must be separate from the controller adapter checkout')
+        return resolve_source(checkout, self.settings['repo'])
 
     def _ssh(self, host):
         if self._key is None:
@@ -110,14 +128,16 @@ class Runner:
                 time.sleep(3)
 
     def install(self):
+        self.provenance = self._resolve_source()
         hosts = self.cloud.hosts()
         if not hosts:
             raise RuntimeError('No Mahi-Mahi instances found. Run fab info; create or start the testbed.')
         scripts = PACKAGE_DIR / 'scripts'
-        arguments = [str(self.source), COMMIT, str(self.settings['remote']['build_jobs'])]
+        arguments = [str(self.source), self.provenance['commit'],
+                     str(self.settings['remote']['build_jobs']), self.provenance['repository']]
         print('Installing and compiling on the controller (output is visible)...', flush=True)
         subprocess.run(['bash', str(scripts / 'install_node.sh'), *arguments], check=True)
-        verify_build(self.source)
+        verify_build(self.source, self.provenance)
         self._parallel(self._wait_ssh, hosts)
         self.cloud.sync_network()
 
@@ -127,27 +147,31 @@ class Runner:
             with self._ssh(host) as connection:
                 connection.run(f'mkdir -m 700 {shlex.quote(remote_tmp)}', hide=True)
                 try:
-                    for name in ('install_node.sh', 'build_node.sh', 'sync_source.sh'):
+                    for name in ('install_node.sh', 'build_node.sh', 'sync_source.sh', 'record_build.py'):
                         connection.put(str(scripts / name), remote=f'{remote_tmp}/{name}')
                     command = shlex.join(['bash', f'{remote_tmp}/install_node.sh', *arguments])
                     connection.run(command, hide=False, pty=False)
-                    result = connection.run(verification_script(str(self.source)), hide=True)
+                    result = connection.run(verification_script(str(self.source), self.provenance), hide=True)
                     return {'host': host.ip, 'build': json.loads(result.stdout)}
                 finally:
                     connection.run(f'rm -f -- {shlex.quote(remote_tmp + "/install_node.sh")} '
                                    f'{shlex.quote(remote_tmp + "/build_node.sh")} '
-                                   f'{shlex.quote(remote_tmp + "/sync_source.sh")} && '
+                                   f'{shlex.quote(remote_tmp + "/sync_source.sh")} '
+                                   f'{shlex.quote(remote_tmp + "/record_build.py")} && '
                                    f'rmdir -- {shlex.quote(remote_tmp)}', hide=True, warn=True)
         records = self._parallel(install_host, hosts)
         self.results_dir.mkdir(parents=True, exist_ok=True)
         save_json(self.results_dir / 'installation.json', {
-            'commit': COMMIT, 'controller': verify_build(self.source), 'nodes': records,
+            **self.provenance, 'controller': verify_build(self.source, self.provenance), 'nodes': records,
         })
-        print(f'Built commit {COMMIT} on controller and {len(hosts)} nodes; ready for fab remote.', flush=True)
+        print(f'Built commit {self.provenance["commit"]} on controller and {len(hosts)} nodes; ready for fab remote.', flush=True)
 
     def remote(self, parameters):
         parameters = validate_benchmark(parameters)
-        verify_build(self.source)
+        if not (self.source / '.mahi-build.json').is_file():
+            verify_build(self.source)
+        self.provenance = self._resolve_source()
+        self.controller_build = verify_build(self.source, self.provenance)
         hosts = self.cloud.hosts()
         if len(hosts) < parameters['nodes']:
             raise RuntimeError(f'Need {parameters["nodes"]} running Mahi-Mahi instances; found {len(hosts)}')
@@ -156,7 +180,7 @@ class Runner:
 
         def preflight(host):
             with self._ssh(host) as connection:
-                result = connection.run(verification_script(str(self.source)), hide=True)
+                result = connection.run(verification_script(str(self.source), self.provenance), hide=True)
                 connection.run('command -v tmux >/dev/null && chronyc waitsync 1 0.01 0.0 1', hide=True, timeout=15)
                 return {'host': host.ip, 'build': json.loads(result.stdout)}
         self.installed = self._parallel(preflight, hosts)
@@ -207,7 +231,9 @@ class Runner:
                 connection.put(io.BytesIO(script.encode()), remote=f'{remote_directory}/start.sh')
                 command = shlex.join(['bash', f'{remote_directory}/start.sh'])
                 connection.run(f'tmux -L {self.socket} new-session -d -s node-{index} {shlex.quote(command)}', hide=True)
+        self.launch_started = time.monotonic()
         self._parallel(launch, active)
+        self.launch_completed = time.monotonic()
 
     def _collect(self, active, committee_size):
         def collect(item):
@@ -266,18 +292,25 @@ class Runner:
         return [error for error in self._parallel(download, active) if error]
 
     def _run_once(self, hosts, parameters):
+        parameters = validate_benchmark(parameters)
         run_id = datetime.now(timezone.utc).strftime('run-%Y%m%dT%H%M%SZ-') + uuid.uuid4().hex[:8]
         directory = self.results_dir / run_id
         directory.mkdir(parents=True, exist_ok=False)
         remote_directory = self.settings['remote']['run_dir'] + '/' + run_id
         active = list(enumerate(hosts[:len(hosts) - parameters['faults']]))
         allocation = load_allocation(parameters['rate'], len(hosts), parameters['faults'])
-        record = {'run_id': run_id, 'commit': COMMIT, 'status': 'starting', 'parameters': parameters,
+        record = {'run_id': run_id, 'commit': self.provenance.get('commit'), 'source': self.provenance, 'status': 'starting', 'parameters': parameters,
                   'load': allocation, 'builds': getattr(self, 'installed', []),
+                  'controller_build': getattr(self, 'controller_build', None),
+                  'adversary': parameters['adversary'],
+                  'crashed_authorities': list(range(len(active), len(hosts))),
+                  'enable_synchronizer': parameters['enable_synchronizer'],
+                  'leader_schedule': parameters['leader_schedule'], 'enable_pipelining': True,
                   'hosts': [dict(authority=i, ip=h.ip, region=h.region, instance_id=h.instance_id,
-                                 started=i < len(active)) for i, h in enumerate(hosts)]}
+                                 started=i < len(active), byzantine=i in parameters['adversary']['byzantine_authorities'])
+                            for i, h in enumerate(hosts)]}
         save_json(directory / 'run.json', record)
-        print(f'Results: {directory}\nTarget load: {allocation}; faulty members are not started.', flush=True)
+        print(f'Results: {directory}\nTarget load: {allocation}; crashed tail members are not started.', flush=True)
         problem = None
         try:
             previous_errors = self._stop(hosts)
@@ -287,6 +320,7 @@ class Runner:
             self._wait_ready(active, len(hosts))
             print(f'All active nodes ready. Warming up for {parameters["warmup"]}s...', flush=True)
             deadline = time.monotonic() + parameters['warmup']
+            record['launch_spread_seconds'] = getattr(self, 'launch_completed', deadline) - getattr(self, 'launch_started', deadline)
             while time.monotonic() < deadline:
                 time.sleep(min(parameters['scrape_interval'], max(0, deadline - time.monotonic())))
                 self._collect(active, len(hosts))
@@ -307,7 +341,9 @@ class Runner:
             elapsed = {index: after[index]['monotonic'] - before[index]['monotonic'] for index in before}
             summary = summarize({i: s['metrics'] for i, s in before.items()},
                                 {i: s['metrics'] for i, s in after.items()}, elapsed)
-            summary.update(load=allocation, commit=COMMIT, run_id=run_id)
+            summary.update(load=allocation, commit=self.provenance.get('commit'), run_id=run_id,
+                           adversary=parameters['adversary'], crashed_authorities=record['crashed_authorities'],
+                           enable_synchronizer=parameters['enable_synchronizer'])
             save_json(directory / 'summary.json', summary)
             with (directory / 'summary.csv').open('w', newline='', encoding='utf-8') as handle:
                 writer = csv.DictWriter(handle, fieldnames=list(summary['nodes'][0]))

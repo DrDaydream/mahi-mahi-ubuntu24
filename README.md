@@ -1,10 +1,10 @@
 # Mahi-Mahi：Ubuntu 24.04 本地与 AWS 实验部署
 
-本仓库保存 Mahi-Mahi 研究原型的固定源码，以及 Ubuntu 24.04 本地运行工具和 AWS Fabric 部署代码。
+本仓库保存 Mahi-Mahi 研究原型，以及 Ubuntu 24.04 本地运行工具和 AWS Fabric 部署代码。A0–A5 敌手实验的控制机命令和配置见 [AWS 敌手实验说明](aws/README.md)，策略与边界见 [adversary.md](docs/adversary.md)。
 
 - 上游：[PasinduTennage/mahi-mahi-consensus](https://github.com/PasinduTennage/mahi-mahi-consensus)。
 - 上游分支：`consensus-rework`。
-- 固定提交：`7c928c06bd436c96b94065119e0e8c2d4ac1bcb6`。
+- 原始上游基线：`7c928c06bd436c96b94065119e0e8c2d4ac1bcb6`；敌手实验构建本仓库的指定提交。
 - Rust：`1.78.0`，保留 `Cargo.lock`，编译使用 `--locked`。
 - 节点程序仍叫 `mysticeti`，这里运行的是 Mahi-Mahi 原型。
 - AWS 默认：五区域、10 个验证节点、Ubuntu 24.04 amd64、`m5.8xlarge`、200 GiB gp3。
@@ -13,7 +13,7 @@
 
 ## 源码目录修复
 
-部署工具和实际编译的上游源码目录分开：
+部署工具和实际编译的源码目录分开：
 
 ```text
 /home/ubuntu/experiments/mahi-mahi-ubuntu24/       本仓库
@@ -22,15 +22,15 @@
 │   ├── settings.json                           自己创建，不提交到 Git
 │   └── results/                                结果和日志
 ├── local/                                     本地运行工具
-└── crates/                                    固定源码快照
+└── crates/                                    协议与敌手实验源码
 
-/home/ubuntu/experiments/mahi-mahi-source/        自动克隆并编译的上游源码
+/home/ubuntu/experiments/mahi-mahi-source/        自动检出并编译的本仓库指定提交
 /home/ubuntu/experiments/mahi-mahi-aws-runs/      各工作节点的逐次实验目录
 ```
 
 `remote.source_dir` 默认是 `/home/ubuntu/experiments/mahi-mahi-source`，不要设成部署仓库或 `aws/` 目录。若该路径已有非 Git 文件，改成另一个独立目录。同步代码会保留已有内容并报错，支持 `.git` 为目录或 worktree 文件的情况。
 
-`fab install` 下载固定上游提交并显示编译输出；`fab remote` 校验和运行已有二进制，不更新 Git、不编译。部署代码完整包含在本仓库，无须之前的 Mysticeti 部署目录。
+`fab install` 从控制机干净的仓库解析 `repo.ref`（默认 `HEAD`），下载本仓库的相同提交并显示编译输出；`fab remote` 校验该提交的已有二进制，不更新远端 Git、不编译。构建记录还校验敌手配置能力和二进制 SHA-256，旧上游二进制不能作为新敌手实验运行。部署代码完整包含在本仓库，无须之前的 Mysticeti 部署目录。
 
 ## AWS：从下载到运行
 
@@ -60,7 +60,7 @@ cd "$HOME/experiments"
 git clone https://github.com/DrDaydream/mahi-mahi-ubuntu24.git
 ```
 
-私有仓库需要控制机具有 GitHub 读取权限。HTTPS 认证使用有该仓库读取权限的 token 或已配置的 Git 凭据，不要把 token 写进仓库地址或配置。验证节点访问公开上游，无须分发你的 GitHub token。
+私有仓库需要控制机和参与构建的验证节点都有本仓库的 Git 读取权限。使用各机器已有的凭据配置；不要把 token 写进仓库地址或配置，部署脚本不会自动分发凭据。
 
 ```bash
 cd "$HOME/experiments/mahi-mahi-ubuntu24/aws"

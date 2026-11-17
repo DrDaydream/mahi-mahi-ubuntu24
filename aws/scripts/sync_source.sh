@@ -18,8 +18,7 @@ if [[ ! -e "$source_dir/.git" ]]; then
             fi
         done
     fi
-    # Materialize the initial branch so a fresh tree is not mistaken for deleted files.
-    git clone --branch consensus-rework --single-branch -- "$repository" "$source_dir"
+    git clone -- "$repository" "$source_dir"
 fi
 cd -- "$source_dir"
 [[ "$(git rev-parse --is-inside-work-tree)" == true ]] || {
@@ -28,8 +27,8 @@ cd -- "$source_dir"
 [[ "$(git remote get-url origin)" == "$repository" ]] || {
     echo 'Existing directory has a different origin; refusing to replace it' >&2; exit 1;
 }
-[[ -z "$(git status --porcelain --untracked-files=no)" ]] || {
-    echo 'Commit or save tracked source edits before fab install' >&2; exit 1;
+[[ -z "$(git status --porcelain --untracked-files=normal)" ]] || {
+    echo 'Commit or save source edits before fab install' >&2; exit 1;
 }
 git fetch --depth 1 origin "$revision"
 git checkout --detach "$revision"

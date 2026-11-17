@@ -190,7 +190,8 @@ def test_run_failure_retains_logs_and_status(monkeypatch, tmp_path):
 def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path):
     import hashlib
     import threading
-    from mahi_aws.settings import COMMIT, RUSTFLAGS, RUST_TOOLCHAIN
+    from mahi_aws.settings import REPOSITORY, RUSTFLAGS, RUST_TOOLCHAIN
+    provenance={'commit':'a'*40,'repository':REPOSITORY,'source_ref':'HEAD'}
 
     settings = copy.deepcopy(DEFAULTS)
     source = tmp_path / 'source'
@@ -199,7 +200,7 @@ def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path):
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b'prebuilt-fixture')
     binary.chmod(0o755)
-    build = {'commit': COMMIT, 'rustflags': RUSTFLAGS, 'rust_toolchain': RUST_TOOLCHAIN,
+    build = {**provenance, 'adversary_schema': 1, 'rustflags': RUSTFLAGS, 'rust_toolchain': RUST_TOOLCHAIN,
              'sha256': hashlib.sha256(binary.read_bytes()).hexdigest()}
     (source / '.mahi-build.json').write_text(json.dumps(build))
     commands, counters = [], {}
@@ -230,6 +231,7 @@ def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, '_ssh', SSH)
     monkeypatch.setattr(remote.subprocess, 'run', genesis)
     monkeypatch.setattr(runner, 'install', lambda: pytest.fail('remote tried to install'))
+    monkeypatch.setattr(runner, '_resolve_source', lambda: provenance)
     runner.remote(dict(settings['benchmark'], nodes=4, rate=1000, duration=1, warmup=0, scrape_interval=1))
     summary = json.loads(next((tmp_path/'results').glob('*/summary.json')).read_text())
     assert summary['mean_latency_ms'] == pytest.approx(200)

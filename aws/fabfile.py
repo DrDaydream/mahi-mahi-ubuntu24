@@ -9,7 +9,7 @@ from invoke.exceptions import Exit
 
 from mahi_aws.cloud import Cloud
 from mahi_aws.remote import Runner
-from mahi_aws.settings import integer, load_settings, validate_benchmark
+from mahi_aws.settings import integer, load_settings, select_adversary, validate_benchmark
 
 
 @contextmanager
@@ -50,6 +50,7 @@ def check(ctx, settings='settings.json'):
     config = load_settings(settings)
     if not Path(config['key']['path']).is_file():
         raise ValueError(f'SSH private key not found: {config["key"]["path"]}')
+    config['benchmark'] = validate_benchmark(config['benchmark'])
     print(json.dumps(config, indent=2))
     print('Settings valid. fab info checks AWS access; fab create creates new instances.')
 
@@ -81,7 +82,7 @@ def create(ctx, nodes=2, settings='settings.json'):
 @task
 @guarded
 def install(ctx, settings='settings.json'):
-    """Install dependencies and visibly compile the fixed commit on controller and nodes."""
+    """Resolve clean controller source and visibly compile that exact commit on controller and nodes."""
     Runner(load_settings(settings)).install()
 
 
@@ -89,7 +90,7 @@ def install(ctx, settings='settings.json'):
 @guarded
 def remote(ctx, nodes=None, rate=None, duration=None, warmup=None, tx_size=None,
            faults=None, runs=None, leaders=None, leader_timeout_ms=None, scrape_interval=None, wave_length=None,
-           settings='settings.json'):
+           adversary=None, byzantine=None, byzantine_ids=None, settings='settings.json'):
     """Run prebuilt Mahi-Mahi validators and collect shared commit metrics; never compile."""
     config = load_settings(settings)
     overrides = dict(nodes=nodes, rate=rate, duration=duration, warmup=warmup, tx_size=tx_size,
@@ -97,6 +98,7 @@ def remote(ctx, nodes=None, rate=None, duration=None, warmup=None, tx_size=None,
                      scrape_interval=scrape_interval, wave_length=wave_length)
     parameters = dict(config['benchmark'])
     parameters.update({key: value for key, value in overrides.items() if value is not None})
+    parameters = select_adversary(parameters, adversary, byzantine, byzantine_ids)
     Runner(config).remote(validate_benchmark(parameters))
 
 

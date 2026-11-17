@@ -4,13 +4,11 @@
 use std::fmt;
 
 use digest::Digest;
-#[cfg(not(test))]
 use ed25519_consensus::Signature;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroize;
 
-#[cfg(not(test))]
 use crate::types::Vote;
 use crate::{
     serde::{ByteRepr, BytesVisitor},
@@ -41,11 +39,9 @@ pub struct SignatureBytes([u8; SIGNATURE_SIZE]);
 #[derive(Serialize, Deserialize)]
 pub struct Signer(Box<ed25519_consensus::SigningKey>);
 
-#[cfg(not(test))]
 type BlockHasher = blake2::Blake2b<digest::consts::U32>;
 
 impl BlockDigest {
-    #[cfg(not(test))]
     pub fn new(
         authority: AuthorityIndex,
         round: RoundNumber,
@@ -55,6 +51,10 @@ impl BlockDigest {
         epoch_marker: EpochStatus,
         signature: &SignatureBytes,
     ) -> Self {
+        #[cfg(test)]
+        if !real_crypto_for_test_enabled() {
+            return Default::default();
+        }
         let mut hasher = BlockHasher::default();
         Self::digest_without_signature(
             &mut hasher,
@@ -69,19 +69,6 @@ impl BlockDigest {
         Self(hasher.finalize().into())
     }
 
-    #[cfg(test)]
-    pub fn new(
-        _authority: AuthorityIndex,
-        _round: RoundNumber,
-        _includes: &[BlockReference],
-        _statements: &[BaseStatement],
-        _meta_creation_time_ns: TimestampNs,
-        _epoch_marker: EpochStatus,
-        _signature: &SignatureBytes,
-    ) -> Self {
-        Default::default()
-    }
-
     /// There is a bit of a complexity around what is considered block digest and what is being signed
     ///
     /// * Block signature covers all the fields in the block, except for signature and reference.digest
@@ -89,7 +76,6 @@ impl BlockDigest {
     ///
     /// This is not very beautiful, but it allows to optimize block synchronization,
     /// by skipping signature verification for all the descendants of the certified block.
-    #[cfg(not(test))]
     fn digest_without_signature(
         hasher: &mut BlockHasher,
         authority: AuthorityIndex,
@@ -176,8 +162,11 @@ impl<T: AsBytes> CryptoHash for T {
 }
 
 impl PublicKey {
-    #[cfg(not(test))]
     pub fn verify_block(&self, block: &StatementBlock) -> Result<(), ed25519_consensus::Error> {
+        #[cfg(test)]
+        if !real_crypto_for_test_enabled() {
+            return Ok(());
+        }
         let signature = Signature::from(block.signature().0);
         let mut hasher = BlockHasher::default();
         BlockDigest::digest_without_signature(
@@ -193,10 +182,6 @@ impl PublicKey {
         self.0.verify(&signature, digest.as_ref())
     }
 
-    #[cfg(test)]
-    pub fn verify_block(&self, _block: &StatementBlock) -> Result<(), ed25519_consensus::Error> {
-        Ok(())
-    }
 }
 
 impl Signer {
@@ -207,7 +192,6 @@ impl Signer {
             .collect()
     }
 
-    #[cfg(not(test))]
     pub fn sign_block(
         &self,
         authority: AuthorityIndex,
@@ -217,6 +201,10 @@ impl Signer {
         meta_creation_time_ns: TimestampNs,
         epoch_marker: EpochStatus,
     ) -> SignatureBytes {
+        #[cfg(test)]
+        if !real_crypto_for_test_enabled() {
+            return Default::default();
+        }
         let mut hasher = BlockHasher::default();
         BlockDigest::digest_without_signature(
             &mut hasher,
@@ -230,19 +218,6 @@ impl Signer {
         let digest: [u8; BLOCK_DIGEST_SIZE] = hasher.finalize().into();
         let signature = self.0.sign(digest.as_ref());
         SignatureBytes(signature.to_bytes())
-    }
-
-    #[cfg(test)]
-    pub fn sign_block(
-        &self,
-        _authority: AuthorityIndex,
-        _round: RoundNumber,
-        _includes: &[BlockReference],
-        _statements: &[BaseStatement],
-        _meta_creation_time_ns: TimestampNs,
-        _epoch_marker: EpochStatus,
-    ) -> SignatureBytes {
-        Default::default()
     }
 
     pub fn public_key(&self) -> PublicKey {
@@ -367,4 +342,28 @@ pub fn dummy_signer() -> Signer {
 
 pub fn dummy_public_key() -> PublicKey {
     dummy_signer().public_key()
+}
+
+// Existing DAG unit fixtures intentionally use zero digests. Fork tests opt in
+// to the production crypto on their own thread without changing other tests.
+#[cfg(test)]
+thread_local! {
+    static REAL_CRYPTO_FOR_TEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn real_crypto_for_test_enabled() -> bool {
+    REAL_CRYPTO_FOR_TEST.with(|enabled| enabled.get())
+}
+
+#[cfg(test)]
+pub(crate) fn with_real_crypto_for_test<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            REAL_CRYPTO_FOR_TEST.with(|enabled| enabled.set(self.0));
+        }
+    }
+    let _restore = Restore(REAL_CRYPTO_FOR_TEST.with(|enabled| enabled.replace(true)));
+    f()
 }
