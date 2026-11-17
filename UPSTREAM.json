@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/PasinduTennage/mahi-mahi-consensus.git",
+  "branch": "consensus-rework",
+  "commit": "7c928c06bd436c96b94065119e0e8c2d4ac1bcb6",
+  "license": "Apache-2.0",
+  "rust_toolchain": "1.78.0",
+  "snapshot": "Upstream tracked files; original README saved as UPSTREAM_README.md; upstream .github automation replaced with deployment validation; credential-shaped example in crates/orchestrator/readme.md replaced with a placeholder.",
+  "protocol_modifications": false,
+  "deployment_source_checkout": "/home/ubuntu/experiments/mahi-mahi-source",
+  "source_checkout_reason": "Compile the exact upstream commit separately from this repository and its deployment settings."
+}

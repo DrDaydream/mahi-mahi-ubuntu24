@@ -1,0 +1,42 @@
+{
+  "testbed_id": "mahi-ubuntu24",
+  "key": {
+    "name": "orca-amazon",
+    "path": "/home/ubuntu/.ssh/orca-amazon.pem"
+  },
+  "repo": {
+    "url": "https://github.com/PasinduTennage/mahi-mahi-consensus.git",
+    "commit": "7c928c06bd436c96b94065119e0e8c2d4ac1bcb6"
+  },
+  "instances": {
+    "type": "m5.8xlarge",
+    "regions": [
+      "us-east-1",
+      "eu-north-1",
+      "ap-southeast-2",
+      "us-west-1",
+      "ap-northeast-1"
+    ],
+    "volume_size": 200
+  },
+  "remote": {
+    "source_dir": "/home/ubuntu/experiments/mahi-mahi-source",
+    "run_dir": "/home/ubuntu/experiments/mahi-mahi-aws-runs",
+    "build_jobs": 2,
+    "parallelism": 5
+  },
+  "ssh_cidrs": [],
+  "benchmark": {
+    "nodes": 10,
+    "faults": 0,
+    "rate": 5000,
+    "tx_size": 512,
+    "duration": 120,
+    "warmup": 20,
+    "runs": 1,
+    "leaders": 4,
+    "wave_length": 5,
+    "leader_timeout_ms": 250,
+    "scrape_interval": 5
+  }
+}
