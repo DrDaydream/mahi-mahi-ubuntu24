@@ -2,6 +2,13 @@
 
 The strategy implementation lives in `crates/mysticeti-core/src/adversary.rs`. Core calls it when creating a local proposal, the committer exposes its final local leader statuses for observation, and the synchronizer passes outgoing blocks through it. Quorum, signature verification, direct/indirect decision rules and leader election are unchanged.
 
+Keep new adversary policy in that single Rust file: mode/config validation,
+fork construction, target and recipient selection, finite attack windows,
+bounded queues, release timers and strategy tests. The rest of Rust only wires
+the module into proposals, leader observation and own/forward/fetch sends.
+Storage handles atomic WAL persistence of the resulting blocks, and the commit
+observer measures actual output independently of the adversary's decisions.
+
 This is an experimental local-observation scheduler. It does not promise to prevent a chosen leader from committing: available DAG support, delivery races, honest forwarding and the original skip/indirect rules determine the outcome. An attempted split, a failed direct commit, an undecided slot and stalled global progress are different measurements.
 
 | Mode | Behavior |
@@ -53,4 +60,53 @@ Retain per-replica scheduling and local decision events. For each chosen slot, d
 
 Use identical Byzantine identities, seed, load, duration, hardware and recovery windows across modes. A2–A5 repeat transaction statements in alternate proposals: report unique committed transaction identifiers where available, and do not interpret extra DAG blocks as additional useful client throughput. A5 belongs to a stronger network-adversary model than A0–A4 and should be labeled separately in paper figures.
 
-See [validation record](adversary-validation.md) for the completed checks. Rust regressions include an opt-in real-crypto scope because legacy DAG unit fixtures use zero digests. Compilation checks include test targets, but do not execute those tests or demonstrate distributed attack outcomes. No cloud experiment or deployment was performed.
+### Fork block output proportion
+
+The benchmark exports `committed_blocks_total{kind="first"}` and
+`committed_blocks_total{kind="extra_fork"}`. These count **non-genesis blocks
+actually emitted in committed sub-DAGs**, after the linearizer's digest
+deduplication. The first output digest for an `(author, round)` slot increments
+`first`; each later distinct digest for that slot increments `extra_fork`.
+Merely generating, receiving, forwarding or storing a fork increments neither.
+This is an additional-version ratio, not the fraction of blocks authored by
+Byzantine nodes or the fraction of every block belonging to an equivocated slot.
+
+For each replica and measurement window:
+
+```
+committed_blocks = delta(first) + delta(extra_fork)
+extra_fork_blocks = delta(extra_fork)
+fork_output_ratio = extra_fork_blocks / committed_blocks
+```
+
+For example, outputting 20 non-genesis blocks including 5 additional versions
+gives `5 / 20 = 25%`. If two digests of a slot are both output, only one is an
+additional version. If only one is output, its contribution to the numerator is
+zero. Slot history persists across warmup and measurement windows, and is rebuilt
+from recovered committed references after restart. A later digest is therefore
+still classified correctly if the first digest was output before the window.
+Process counters reset on restart; windows that observe a reset are invalid.
+
+AWS JSON/CSV includes the two window counts and the ratio (a fraction in `[0,1]`)
+per replica. Terminal `SUMMARY` and `summary.txt` display counts and percentages,
+plus an arithmetic mean over replicas with observed block output and a separate
+honest-replica mean. Replica outputs are never summed to claim global output.
+Zero block output or old binaries without these counters gives `N/A` / JSON
+`null`, not zero percent. Old result files cannot reconstruct this measurement.
+
+Zero-transaction-output replicas retain zero TPS and undefined latency. Mean
+latency uses only replicas with positive transaction output; an entirely stalled
+measurement still produces a report. TPS remains the raw shared transaction-entry
+rate, without deduplication of transaction payloads across forks. The fork-block
+ratio does not mathematically correct this TPS into unique-transaction goodput.
+
+`enable_synchronizer=true` now enables actual missing-parent requests. The
+previous inverted Rust check disabled fetching when this setting was true. The
+fix requires rebuilding through `fab install`; A0 comparisons should use the
+same corrected binary as the attack runs.
+
+See [validation record](adversary-validation.md) for the executed tests, node/test
+compilation checks and six core-test failures also reproduced on the unchanged
+baseline. Rust regressions include an opt-in real-crypto scope because legacy
+DAG unit fixtures use zero digests. Local checks do not demonstrate distributed
+attack outcomes. No cloud experiment or deployment was performed.

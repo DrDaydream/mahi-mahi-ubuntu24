@@ -1,5 +1,65 @@
 # A0–A5 validation record
 
+## Runtime metrics and experiment reporting — 2026-11-18
+
+Baseline: `79b71d2794a6049e604e421a67a94e4ae9891f42`. Validation was performed
+in a temporary Ubuntu 24.04 amd64 WSL2 environment with Rust 1.78.0, and on
+the Windows controller for offline Python checks. No EC2 connection, cloud
+experiment or deployment was performed.
+
+The A0–A5 strategy remains in `crates/mysticeti-core/src/adversary.rs`; its only
+change in this revision documents the module boundary. This revision adds
+committed fork-output counters, zero-progress-aware AWS reports and corrects
+the inverted missing-parent fetch enable flag. It keeps the existing Fabric
+create/install/remote interface and source-directory arrangement.
+
+Completed checks:
+
+- Full offline Python suite: **229 passed**. This includes zero output from
+  startup, all-zero windows, fork counter deltas and invalid resets, offline
+  reporting, prebuilt-only execution, and cleanup after report disk/pipe errors
+  or Ctrl-C during output.
+- Rust adversary tests: **14 passed** using actual cryptographic digests and
+  signatures where required.
+- New committed-output regression: **1 passed**. Covers genesis exclusion,
+  uncommitted forks, distinct committed versions, initialized zero metrics and
+  slot-history recovery.
+- New synchronizer behavior regressions: **2 passed**. The tests exercise the
+  real missing-parent fetch loop with enabled/disabled settings; both failed
+  on the old inverted condition before the fix.
+- Complete Rust core library suite: **65 passed, 6 failed, 1 ignored**. The
+  network synchronization and validator commit/crash/synchronization smoke
+  tests passed. This is not an all-green core suite.
+- `cargo check --locked -p mysticeti-core -p mysticeti --tests`: **passed**.
+  Rust 1.78.0, native CPU flag, two build jobs, no incremental compilation and
+  dev debug info disabled were used. Existing compiler warnings remain.
+- Independent source review and cleanup re-review: completed with no remaining
+  material findings. Git whitespace validation passed.
+
+All six core failures were reproduced on a clean checkout of the baseline,
+after cleaning the core package's shared build artifacts to force recompilation:
+
+| Test | Baseline result |
+| --- | --- |
+| `consensus::tests::base_committer_tests::direct_skip` | assertion failure |
+| `consensus::tests::base_committer_tests::no_leader` | assertion failure |
+| `consensus::tests::multi_committer_tests::direct_skip` | assertion failure |
+| `consensus::tests::multi_committer_tests::no_leader` | assertion failure |
+| `consensus::tests::pipelined_committer_tests::no_leader` | assertion failure |
+| `syncer::tests::test_syncer` | no Tokio reactor when constructing the commit handler |
+
+The baseline consensus selection finished with 27 passed / 5 failed; its exact
+syncer selection failed with the same missing-runtime error. No consensus rule
+or unrelated test fixture was changed to make these failures disappear.
+
+These checks execute local tests and type-check the node and test targets. They
+do not measure a distributed attack's effectiveness, build a release binary,
+run the simulator feature, or establish unique-transaction throughput. Actual
+EC2 experiment results still need to be collected with `fab install` and
+`fab remote` using this revision.
+
+## Initial A0–A5 implementation — 2026-11-17
+
 Validation date: 2026-11-17. Source baseline: `e425c72d25398bee5c60fde7f8db75f513a0dde6`.
 
 The user authorized a compilation check after implementation. In a temporary Ubuntu 24.04 amd64 WSL2 environment, using the repository's Rust 1.78.0 toolchain, the following check passed with exit code 0:

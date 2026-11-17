@@ -341,6 +341,8 @@ pub struct TestCommitHandler<H = HashSet<TransactionLocator>> {
     transaction_votes: TransactionAggregator<QuorumThreshold, H>,
     committee: Arc<Committee>,
     committed_leaders: Vec<BlockReference>,
+    /// Output history spans measurement windows; rebuilt from committed WAL references on recovery.
+    committed_slots: HashSet<(AuthorityIndex, crate::types::RoundNumber)>,
     // committed_dags: Vec<CommittedSubDag>,
     start_time: TimeInstant,
     transaction_time: Arc<Mutex<HashMap<TransactionLocator, TimeInstant>>>,
@@ -402,6 +404,7 @@ impl<H: ProcessedTransactionHandler<TransactionLocator>> TestCommitHandler<H> {
             transaction_votes: TransactionAggregator::with_handler(handler),
             committee,
             committed_leaders: vec![],
+            committed_slots: HashSet::new(),
             // committed_dags: vec![],
             start_time: TimeInstant::now(),
             transaction_time,
@@ -491,6 +494,14 @@ for TestCommitHandler<H>
         for commit in &committed {
             self.committed_leaders.push(commit.anchor);
             for block in &commit.blocks {
+                if block.round() > 0 {
+                    let kind = if self.committed_slots.insert((block.author(), block.round())) {
+                        "first"
+                    } else {
+                        "extra_fork"
+                    };
+                    self.metrics.committed_blocks_total.with_label_values(&[kind]).inc();
+                }
                 if !self.consensus_only {
                     let processed =
                         self.transaction_votes
@@ -531,6 +542,74 @@ for TestCommitHandler<H>
         } else {
             assert!(committed.is_empty());
         }
+        self.committed_slots = committed.iter().filter(|reference| reference.round > 0)
+            .map(|reference| (reference.authority, reference.round)).collect();
         self.commit_interpreter.committed = committed;
+    }
+}
+
+#[cfg(all(test, not(feature = "simulator")))]
+mod fork_output_tests {
+    use super::*;
+    use crate::{crypto::{with_real_crypto_for_test, Signer}, test_util::TestBlockWriter};
+    use prometheus::Registry;
+
+    fn count(registry: &Registry, kind: &str) -> Option<u64> {
+        registry.gather().iter().find(|family| family.get_name() == "committed_blocks_total")
+            .and_then(|family| family.get_metric().iter().find(|metric| {
+                metric.get_label().iter().any(|label| label.get_name() == "kind" && label.get_value() == kind)
+            }).map(|metric| metric.get_counter().get_value() as u64))
+    }
+
+    #[tokio::test]
+    async fn committed_fork_outputs_exclude_genesis_and_uncommitted_versions_and_survive_recovery() {
+        with_real_crypto_for_test(|| {
+            let committee = Committee::new_for_benchmarks(4);
+            let mut writer = TestBlockWriter::new(&committee);
+            let genesis: Vec<_> = (0..4).map(StatementBlock::new_genesis).collect();
+            writer.add_blocks(genesis.clone());
+            let signers = Signer::new_for_test(4);
+            let make = |author: usize, round, parents| Data::new(StatementBlock::new_with_signer(
+                author as u64, round, parents, vec![], 0, false, &signers[author],
+            ));
+            let parents = vec![*genesis[1].reference(), *genesis[0].reference(), *genesis[2].reference()];
+            let first = make(1, 1, parents.clone());
+            let mut reversed = parents.clone();
+            reversed.swap(1, 2);
+            let fork = make(1, 1, reversed);
+            assert_ne!(first.reference(), fork.reference());
+            let ordinary = make(3, 1, vec![*genesis[3].reference(), *genesis[0].reference(), *genesis[2].reference()]);
+            let anchor = make(2, 2, vec![*first.reference(), *fork.reference(), *ordinary.reference()]);
+            writer.add_blocks(vec![first.clone(), fork.clone(), ordinary, anchor.clone()]);
+            let registry = Registry::new();
+            let metrics = Metrics::new(&registry, None).0;
+            let shared = registry.gather().into_iter().find(|family| family.get_name() == "latency_s")
+                .expect("shared histogram must exist before the first commit");
+            assert_eq!(shared.get_metric()[0].get_histogram().get_sample_count(), 0);
+            let mut handler: TestCommitHandler = TestCommitHandler::new(
+                committee.clone(), Default::default(), metrics, 900,
+            );
+            // Merely storing a fork must not count as consensus output.
+            assert_eq!(count(&registry, "first"), Some(0));
+            assert_eq!(count(&registry, "extra_fork"), Some(0));
+            handler.handle_commit(&writer.block_store(), vec![first]);
+            assert_eq!(count(&registry, "first"), Some(1));
+            assert_eq!(count(&registry, "extra_fork"), Some(0));
+
+            let registry_after_restart = Registry::new();
+            let recovered_metrics = Metrics::new(&registry_after_restart, None).0;
+            let mut recovered: TestCommitHandler = TestCommitHandler::new(
+                committee, Default::default(), recovered_metrics, 901,
+            );
+            recovered.recover_committed(handler.commit_interpreter.committed.clone(), Some(handler.aggregator_state()));
+            recovered.handle_commit(&writer.block_store(), vec![anchor.clone()]);
+            assert_eq!(count(&registry_after_restart, "first"), Some(2));
+            assert_eq!(count(&registry_after_restart, "extra_fork"), Some(1));
+
+            handler.handle_commit(&writer.block_store(), vec![anchor]);
+            // Output B1, its second digest, D1 and C2: 1 / 4 = 25% extra forks.
+            assert_eq!(count(&registry, "first"), Some(3));
+            assert_eq!(count(&registry, "extra_fork"), Some(1));
+        });
     }
 }

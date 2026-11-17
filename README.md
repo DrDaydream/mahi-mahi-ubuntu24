@@ -158,7 +158,7 @@ PY
 fab remote --nodes=10 --rate=5000 --tx-size=512 --warmup=20 --duration=60 --runs=1
 ```
 
-所有活动节点出现共享交易提交后才预热，再测量指定时长。工作目录、存储、配置和日志按实验隔离。
+A0 基线等待所有活动节点出现共享交易提交后预热，再测量指定时长。A1～A5 在节点进程和指标就绪后预热，允许记录从开始就零提交的攻击结果。工作目录、存储、配置和日志按实验隔离。
 
 ### 9. 50000 TPS 实验
 
@@ -176,6 +176,7 @@ fab remote --nodes=10 --rate=50000 --tx-size=512 --warmup=30 --duration=120 --ru
 
 - `run.json`：状态、参数、节点分布、负载和错误。
 - `summary.json` / `summary.csv`：汇总和各节点统计。
+- `summary.txt`：终端 SUMMARY 的最终保存版本，含零提交节点和分叉区块输出比例。
 - `logs/node-*.log`：节点日志，失败时也尝试下载。
 - `metrics/`、`samples.jsonl`：原始指标和采样时刻。
 - `genesis/`：委员会和节点配置。
@@ -219,6 +220,8 @@ cp -n /home/ubuntu/experiments/mahi-mahi-aws/aws/settings.json "$HOME/experiment
 完整命令见 [本地 Ubuntu 24.04 步骤](docs/local-ubuntu24.md)。本地默认端口 2000，检查监听端口、源端口冲突及乘以 10 的溢出。
 
 AWS 和本地均使用 `latency_s_count{workload="shared"}`、`latency_s_sum{workload="shared"}` 的窗口差值：副本 TPS 为提交数除以实际采样间隔，平均延迟为延迟总和除以提交数；汇总取副本均值，不相加重复计数。
+
+AWS 敌手实验另统计分叉区块输出比例：同一作者、同一轮次的额外已提交摘要数 / 全部非创世提交输出区块数。报告逐节点分子、分母、百分比及诚实副本均值；零输出或旧指标缺失时为 `N/A`。AWS 零提交副本保留 0 TPS，平均延迟只统计有提交的副本。A2～A5 可能重复提交相同交易内容，当前 TPS 是原始条目速率，完整口径见 [敌手实验说明](docs/adversary.md)。
 
 测量不包含生产 Sui 应用执行，也不等于 Bullshark 的最早副本提交或客户端抽样延迟口径。输入速率是生成目标，不是实际到达速率的测量值。
 

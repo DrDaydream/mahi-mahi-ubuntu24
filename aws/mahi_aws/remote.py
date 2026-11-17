@@ -19,6 +19,7 @@ import yaml
 from .build import verification_script, verify_build
 from .cloud import Cloud
 from .metrics import parse_snapshot, summarize
+from .report import format_summary
 from .settings import ADVERSARY_DEFAULTS, load_allocation, validate_benchmark
 from .source import resolve_source
 
@@ -261,22 +262,23 @@ class Runner:
         with (directory / 'samples.jsonl').open('a', encoding='utf-8') as handle:
             handle.write(json.dumps({'phase': name, 'nodes': record}) + '\n')
 
-    def _wait_ready(self, active, committee_size):
+    def _wait_ready(self, active, committee_size, require_commits=True):
         deadline = time.monotonic() + 120
         attempts = 0
         while True:
             try:
                 samples = self._collect(active, committee_size)
                 stalled = [i for i, sample in samples.items() if sample['metrics']['count'] <= 0]
-                if stalled:
+                if require_commits and stalled:
                     raise RuntimeError('No shared commits on authorities: ' + ', '.join(stalled))
                 return samples
             except Exception as error:
                 if time.monotonic() >= deadline:
-                    raise RuntimeError(f'No shared commit progress on every active validator within 120s: {error}; see results logs') from error
+                    condition = 'shared commit progress' if require_commits else 'live process and valid metrics'
+                    raise RuntimeError(f'No {condition} on every active validator within 120s: {error}; see results logs') from error
                 attempts += 1
                 if attempts % 5 == 1:
-                    print(f'Waiting for shared commits: {error}', flush=True)
+                    print(f'Waiting for ready validators: {error}', flush=True)
                 time.sleep(2)
 
     def _download_logs(self, active, directory, remote_directory):
@@ -312,12 +314,13 @@ class Runner:
         save_json(directory / 'run.json', record)
         print(f'Results: {directory}\nTarget load: {allocation}; crashed tail members are not started.', flush=True)
         problem = None
+        summary = None
         try:
             previous_errors = self._stop(hosts)
             if previous_errors:
                 raise RuntimeError('Could not stop a previous experiment: ' + '\n'.join(previous_errors))
             self._configure_and_start(hosts, parameters, directory, remote_directory)
-            self._wait_ready(active, len(hosts))
+            self._wait_ready(active, len(hosts), parameters['adversary']['mode'] == 'A0')
             print(f'All active nodes ready. Warming up for {parameters["warmup"]}s...', flush=True)
             deadline = time.monotonic() + parameters['warmup']
             record['launch_spread_seconds'] = getattr(self, 'launch_completed', deadline) - getattr(self, 'launch_started', deadline)
@@ -355,6 +358,18 @@ class Runner:
             record['error'] = str(error) or type(error).__name__
             problem = error
         finally:
+            try:
+                visible = dict(record, status=('measurement complete' if record['status'] == 'complete' else 'failed')
+                               + '; cleanup/log download pending')
+                text = format_summary(visible, summary, directory)
+                print(text, flush=True)
+                (directory / 'summary.txt').write_text(text, encoding='utf-8')
+            except BaseException as error:
+                # Report failures and Ctrl-C during output must not leave validators running.
+                record['report_error'] = str(error) or type(error).__name__
+                record['status'] = 'failed'
+                if problem is None:
+                    problem = error
             stop_errors = self._stop(hosts)
             log_errors = self._download_logs(active, directory, remote_directory)
             record['cleanup_errors'] = stop_errors
@@ -364,7 +379,9 @@ class Runner:
                 if problem is None:
                     problem = RuntimeError('Cleanup/log collection failed; see run.json')
             save_json(directory / 'run.json', record)
+            text = format_summary(record, summary, directory)
+            (directory / 'summary.txt').write_text(text, encoding='utf-8')
         if problem is not None:
+            print(text, flush=True)
             raise problem
-        print(f'Complete. Replica mean TPS: {summary["replica_tps_mean"]:.2f}; '
-              f'mean shared commit latency: {summary["mean_latency_ms"]:.2f} ms\n{directory}', flush=True)
+        print(f'Complete. Results and summary.txt: {directory}', flush=True)

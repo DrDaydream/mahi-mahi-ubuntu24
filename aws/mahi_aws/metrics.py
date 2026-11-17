@@ -7,6 +7,7 @@ from statistics import fmean
 
 _METRICS = {"latency_s_count": "count", "latency_s_sum": "sum"}
 _LEADERS = "committed_leaders_total"
+_BLOCKS = "committed_blocks_total"
 _METRIC_NAME = re.compile(r"[a-zA-Z_:][a-zA-Z0-9_:]*")
 _SAMPLE = re.compile(
     r"([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?[ \t]+"
@@ -63,13 +64,14 @@ def parse_snapshot(text: str) -> dict:
     result = {"committed_leaders": 0.0}
     shared_labels = {}
     leader_series = set()
+    block_counts = {}
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
         name_match = _METRIC_NAME.match(line)
         if name_match is None:
             continue
         name = name_match.group()
-        if name not in _METRICS and name != _LEADERS:
+        if name not in _METRICS and name not in (_LEADERS, _BLOCKS):
             continue
         sample = _SAMPLE.fullmatch(line)
         if sample is None:
@@ -85,7 +87,14 @@ def parse_snapshot(text: str) -> dict:
         if _NUMBER.fullmatch(raw_value) is None:
             raise ValueError(f"Malformed {name} value on line {line_number}")
         value = _nonnegative(raw_value, f"{name} on line {line_number}")
-        if name == _LEADERS:
+        if name == _BLOCKS:
+            kind = labels.get('kind')
+            if kind not in ('first', 'extra_fork') or kind in block_counts:
+                raise ValueError('Invalid or duplicate committed_blocks_total kind')
+            if not value.is_integer():
+                raise ValueError('committed_blocks_total must be an integer')
+            block_counts[kind] = value
+        elif name == _LEADERS:
             series = tuple(sorted(labels.items()))
             if series in leader_series:
                 raise ValueError("Duplicate committed_leaders_total series")
@@ -102,6 +111,11 @@ def parse_snapshot(text: str) -> dict:
             raise ValueError(f"Missing shared latency_s_{key}")
     if shared_labels["count"] != shared_labels["sum"]:
         raise ValueError("Shared latency_s_count and latency_s_sum labels differ")
+    if block_counts:
+        if set(block_counts) != {'first', 'extra_fork'}:
+            raise ValueError('Incomplete committed block counters')
+        result['committed_blocks'] = sum(block_counts.values())
+        result['extra_fork_blocks'] = block_counts['extra_fork']
     return result
 
 
@@ -119,9 +133,10 @@ def summarize(
     ``replica_tps_mean`` is the arithmetic mean of replica TPS, never their
     sum. ``mean_latency_ms`` is the arithmetic mean of per-replica latency
     means, not a count-weighted mean. All counters are finite and nonnegative;
-    any reset, missing counter, or replica with no new transactions raises
-    ValueError. Consequently ``all_nodes_progress`` is true for every returned
-    summary. Optional ``committed_leaders`` defaults to zero and is checked for
+    any reset or missing counter raises ValueError. Replicas with no new
+    transactions contribute zero TPS and have undefined (None) latency. The
+    aggregate latency averages only replicas with new commits, or is None
+    when none progress. Optional ``committed_leaders`` defaults to zero and is checked for
     resets; it does not substitute for committed transaction progress.
     """
     if not before or set(before) != set(after) or set(before) != set(elapsed):
@@ -142,20 +157,42 @@ def summarize(
                 raise ValueError(f"Node {authority} counter reset: {key}")
             deltas[key] = last - first
         count = deltas["count"]
-        if count == 0:
-            raise ValueError(f"Node {authority} made zero committed transaction progress")
+        if count == 0 and deltas["sum"] != 0:
+            raise ValueError(f"Node {authority} latency sum increased without new commits")
+        block_fields = ('committed_blocks', 'extra_fork_blocks')
+        blocks = extras = ratio = None
+        if any(key in snapshot for snapshot in (start, end) for key in block_fields):
+            if not all(key in snapshot for snapshot in (start, end) for key in block_fields):
+                raise ValueError(f'Node {authority} has incomplete committed block counters')
+            values = []
+            for snapshot in (start, end):
+                total, extra = (_nonnegative(snapshot[key], key) for key in block_fields)
+                if not total.is_integer() or not extra.is_integer() or extra > total:
+                    raise ValueError(f'Node {authority} has inconsistent committed block counters')
+                values.append((total, extra))
+            blocks, extras = (last - first for first, last in zip(*values))
+            if blocks < 0 or extras < 0 or extras > blocks:
+                raise ValueError(f'Node {authority} has reset or inconsistent committed block counters')
+            ratio = extras / blocks if blocks else None
         nodes.append(
             {
                 "authority": authority,
                 "committed_transactions": count,
                 "tps": count / duration,
-                "mean_latency_ms": deltas["sum"] / count * 1000,
+                "mean_latency_ms": deltas["sum"] / count * 1000 if count else None,
                 "duration_s": duration,
+                "committed_blocks": blocks,
+                "extra_fork_blocks": extras,
+                "fork_output_ratio": ratio,
             }
         )
+    latencies = [node["mean_latency_ms"] for node in nodes if node["committed_transactions"] > 0]
+    ratios = [node['fork_output_ratio'] for node in nodes if node['fork_output_ratio'] is not None]
     return {
         "nodes": nodes,
         "replica_tps_mean": fmean(node["tps"] for node in nodes),
-        "mean_latency_ms": fmean(node["mean_latency_ms"] for node in nodes),
-        "all_nodes_progress": True,
+        "mean_latency_ms": fmean(latencies) if latencies else None,
+        "all_nodes_progress": all(node["committed_transactions"] > 0 for node in nodes),
+        "fork_output_ratio_mean": fmean(ratios) if ratios else None,
+        "fork_ratio_contributors": len(ratios),
     }

@@ -49,6 +49,8 @@ pub struct Metrics {
     pub latency_s: HistogramVec, // get, specify the label of shared object, metrics address? curl,
     pub latency_squared_s: CounterVec,
     pub committed_leaders_total: IntCounterVec,
+    /// Non-genesis consensus output, partitioned by first vs additional digest per slot.
+    pub committed_blocks_total: IntCounterVec,
     pub leader_timeout_total: IntCounter,
     pub inter_block_latency_s: HistogramVec,
 
@@ -189,7 +191,16 @@ impl Metrics {
             )
             .unwrap(),
         };
+        let committed_blocks_total = register_int_counter_vec_with_registry!(
+            "committed_blocks_total",
+            "Non-genesis committed output blocks: first or extra digest for (author, round)",
+            &["kind"],
+            registry,
+        ).unwrap();
+        committed_blocks_total.with_label_values(&["first"]);
+        committed_blocks_total.with_label_values(&["extra_fork"]);
         let metrics = Self {
+            committed_blocks_total,
             benchmark_duration: register_int_counter_with_registry!(
                 BENCHMARK_DURATION,
                 "Duration of the benchmark",
@@ -350,6 +361,8 @@ impl Metrics {
             connection_latency_sender,
         };
 
+        // Publish genuine zero samples so a live, never-committing replica can be measured.
+        metrics.latency_s.with_label_values(&["shared"]);
         (Arc::new(metrics), reporter)
     }
 }

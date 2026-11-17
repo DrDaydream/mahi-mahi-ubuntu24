@@ -3,6 +3,12 @@
 
 //! Bounded, local adversarial proposal construction and network scheduling.
 //!
+//! Keep A0-A5 policy, fork construction, target selection, bounded queues and
+//! timed release in this file. Integration points are `prepare_proposal` in Core,
+//! `observe_leaders` in the committer, and `sender` / `send_block` on outgoing
+//! own, forwarded and fetched blocks. WAL persistence and committed-output
+//! accounting stay with storage and the commit observer respectively.
+//!
 //! This module never changes committee membership, consensus thresholds or decisions.
 //! It signs only this node's configured Byzantine identity. Its clock starts with Core,
 //! so attack windows on different machines can differ by their startup skew.

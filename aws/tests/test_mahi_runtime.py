@@ -10,6 +10,7 @@ import yaml
 from mahi_aws import remote
 from mahi_aws.cloud import Cloud
 from mahi_aws.settings import DEFAULTS, load_allocation, validate_benchmark
+from mahi_aws.settings import ADVERSARY_DEFAULTS
 
 
 def genesis_fixture(args, **kwargs):
@@ -31,6 +32,10 @@ def genesis_fixture(args, **kwargs):
                        'enable_synchronizer': True, 'rounds_in_epoch': 4294967295,
                        'shutdown_grace_period': {'secs': 2, 'nanos': 0}},
     }))
+    config_path = output / 'public-config.yaml'
+    config = yaml.safe_load(config_path.read_text())
+    config['parameters']['adversary'] = ADVERSARY_DEFAULTS
+    config_path.write_text(yaml.safe_dump(config))
     for i in range(len(ips)):
         (output / f'private-config-{i}.yaml').write_text(yaml.safe_dump({
             'authority': i, 'keypair': f'private-{i}', 'storage_path': str(output / f'storage-{i}'),
@@ -164,6 +169,13 @@ def test_ready_failure_names_stalled_authority(monkeypatch):
         runner._wait_ready(list(enumerate(hosts(2))), 4)
 
 
+def test_attack_readiness_can_measure_replicas_that_have_never_committed(monkeypatch):
+    runner = remote.Runner(copy.deepcopy(DEFAULTS), cloud=SimpleNamespace())
+    samples = {'0': {'metrics': {'count': 0, 'sum': 0}}, '1': {'metrics': {'count': 0, 'sum': 0}}}
+    monkeypatch.setattr(runner, '_collect', lambda *args: samples)
+    assert runner._wait_ready(list(enumerate(hosts(2))), 4, require_commits=False) == samples
+
+
 def test_resource_ownership_excludes_mysticeti_and_bullshark():
     cloud = Cloud(copy.deepcopy(DEFAULTS), clients={})
     assert cloud.tags == {'ManagedBy': 'mahi-fabric', 'Testbed': 'mahi-ubuntu24'}
@@ -172,13 +184,17 @@ def test_resource_ownership_excludes_mysticeti_and_bullshark():
                                        {'Key': 'Testbed', 'Value': 'mahi-ubuntu24'}]})
 
 
-def test_run_failure_retains_logs_and_status(monkeypatch, tmp_path):
+def test_run_failure_retains_logs_and_status(monkeypatch, tmp_path, capsys):
     runner = remote.Runner(copy.deepcopy(DEFAULTS), cloud=SimpleNamespace(), results_dir=tmp_path)
     stopped = []
     monkeypatch.setattr(runner, '_stop', lambda _: stopped.append(True) or [])
     monkeypatch.setattr(runner, '_configure_and_start', lambda *args: None)
     monkeypatch.setattr(runner, '_wait_ready', lambda *args: (_ for _ in ()).throw(RuntimeError('stalled authority 2')))
-    monkeypatch.setattr(runner, '_download_logs', lambda *args: [])
+    def download_after_diagnostics(*args):
+        output = capsys.readouterr().out
+        assert 'SUMMARY' in output and 'stalled authority 2' in output
+        return []
+    monkeypatch.setattr(runner, '_download_logs', download_after_diagnostics)
     with pytest.raises(RuntimeError, match='stalled authority 2'):
         runner._run_once(hosts(), DEFAULTS['benchmark'])
     record = json.loads(next(tmp_path.glob('*/run.json')).read_text())
@@ -187,7 +203,48 @@ def test_run_failure_retains_logs_and_status(monkeypatch, tmp_path):
     assert len(stopped) == 2
 
 
-def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path):
+def test_report_write_failure_still_stops_nodes_and_collects_logs(monkeypatch, tmp_path):
+    runner = remote.Runner(copy.deepcopy(DEFAULTS), cloud=SimpleNamespace(), results_dir=tmp_path)
+    stopped, downloaded = [], []
+    monkeypatch.setattr(runner, '_stop', lambda _: stopped.append(True) or [])
+    monkeypatch.setattr(runner, '_configure_and_start', lambda *args: None)
+    monkeypatch.setattr(runner, '_wait_ready', lambda *args: (_ for _ in ()).throw(RuntimeError('node died')))
+    monkeypatch.setattr(runner, '_download_logs', lambda *args: downloaded.append(True) or [])
+    write_text = Path.write_text
+    def write(path, *args, **kwargs):
+        if path.name == 'summary.txt':
+            raise OSError('disk full')
+        return write_text(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'write_text', write)
+    with pytest.raises(OSError, match='disk full'):
+        runner._run_once(hosts(), DEFAULTS['benchmark'])
+    assert len(stopped) == 2
+    assert downloaded == [True]
+
+
+@pytest.mark.parametrize('error', [BrokenPipeError('pipe closed'), KeyboardInterrupt()])
+def test_report_output_interruption_still_stops_nodes_and_collects_logs(monkeypatch, tmp_path, error):
+    runner = remote.Runner(copy.deepcopy(DEFAULTS), cloud=SimpleNamespace(), results_dir=tmp_path)
+    stopped, downloaded = [], []
+    monkeypatch.setattr(runner, '_stop', lambda _: stopped.append(True) or [])
+    monkeypatch.setattr(runner, '_configure_and_start', lambda *args: None)
+    monkeypatch.setattr(runner, '_wait_ready', lambda *args: (_ for _ in ()).throw(RuntimeError('node died')))
+    monkeypatch.setattr(runner, '_download_logs', lambda *args: downloaded.append(True) or [])
+    def interrupted_print(text, **kwargs):
+        if 'SUMMARY' in text:
+            raise error
+    monkeypatch.setattr('builtins.print', interrupted_print)
+    with pytest.raises(type(error)):
+        runner._run_once(hosts(), DEFAULTS['benchmark'])
+    assert len(stopped) == 2
+    assert downloaded == [True]
+    record = json.loads(next(tmp_path.glob('*/run.json')).read_text())
+    assert record['status'] == 'failed'
+    assert record['report_error'] == (str(error) or type(error).__name__)
+
+
+@pytest.mark.parametrize('stalled', [[], [0], [0, 1, 2, 3]])
+def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path, capsys, stalled):
     import hashlib
     import threading
     from mahi_aws.settings import REPOSITORY, RUSTFLAGS, RUST_TOOLCHAIN
@@ -219,7 +276,13 @@ def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path):
                 if '/metrics' in command:
                     i = counters.get(self.host.ip, 0) + 1
                     counters[self.host.ip] = i
-                    return SimpleNamespace(stdout=f'latency_s_count{{workload="shared"}} {i*100}\nlatency_s_sum{{workload="shared"}} {i*20}\n')
+                    authority = hosts(4).index(self.host)
+                    count = 0 if authority in stalled else i
+                    return SimpleNamespace(stdout=(
+                        f'latency_s_count{{workload="shared"}} {count*100}\n'
+                        f'latency_s_sum{{workload="shared"}} {count*20}\n'
+                        f'committed_blocks_total{{kind="first"}} {count*10}\n'
+                        f'committed_blocks_total{{kind="extra_fork"}} {count*2}\n'))
             return SimpleNamespace(stdout=json.dumps(build))
 
     def genesis(args, **kwargs):
@@ -232,12 +295,24 @@ def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path):
     monkeypatch.setattr(remote.subprocess, 'run', genesis)
     monkeypatch.setattr(runner, 'install', lambda: pytest.fail('remote tried to install'))
     monkeypatch.setattr(runner, '_resolve_source', lambda: provenance)
-    runner.remote(dict(settings['benchmark'], nodes=4, rate=1000, duration=1, warmup=0, scrape_interval=1))
+    download_logs = runner._download_logs
+    def download_with_visible_report(*args):
+        assert 'SUMMARY' in capsys.readouterr().out
+        return download_logs(*args)
+    monkeypatch.setattr(runner, '_download_logs', download_with_visible_report)
+    attack = {'mode': 'A3', 'duration_ms': 100, 'start_after_ms': 0, 'delay_ms': 1, 'late_delay_ms': 1}
+    runner.remote(dict(settings['benchmark'], nodes=4, rate=1000, duration=1, warmup=0,
+                       scrape_interval=1, adversary=attack))
     summary = json.loads(next((tmp_path/'results').glob('*/summary.json')).read_text())
-    assert summary['mean_latency_ms'] == pytest.approx(200)
+    assert summary['mean_latency_ms'] == (None if len(stalled) == 4 else pytest.approx(200))
     assert len(summary['nodes']) == 4
     assert summary['replica_tps_mean'] == pytest.approx(sum(n['tps'] for n in summary['nodes'])/4)
     assert summary['load']['effective_total_tps'] == 1000
+    assert summary['all_nodes_progress'] is (not stalled)
+    assert summary['fork_output_ratio_mean'] == (None if len(stalled) == 4 else pytest.approx(1/6))
+    assert summary['fork_ratio_contributors'] == 4 - len(stalled)
+    saved_text = next((tmp_path/'results').glob('*/summary.txt')).read_text(encoding='utf-8')
+    assert 'MAHI-MAHI AWS' in saved_text and 'Status: complete' in saved_text
     assert len(list((tmp_path/'results').glob('*/logs/node-*.log'))) == 4
     assert all(not any(word in command.split() for word in ('cargo', 'git', 'apt-get', 'rustup')) for command in commands)
 

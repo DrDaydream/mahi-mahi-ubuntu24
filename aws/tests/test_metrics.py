@@ -141,6 +141,9 @@ def test_summary_uses_window_deltas_and_averages_replicas():
             "tps": 100,
             "mean_latency_ms": 200,
             "duration_s": 2,
+            "committed_blocks": None,
+            "extra_fork_blocks": None,
+            "fork_output_ratio": None,
         },
         {
             "authority": "authority-1",
@@ -148,6 +151,9 @@ def test_summary_uses_window_deltas_and_averages_replicas():
             "tps": 200,
             "mean_latency_ms": 300,
             "duration_s": 2,
+            "committed_blocks": None,
+            "extra_fork_blocks": None,
+            "fork_output_ratio": None,
         },
     ]
     assert result["replica_tps_mean"] == 150
@@ -211,11 +217,29 @@ def test_summary_rejects_resets_in_any_counter(end):
         )
 
 
-def test_summary_rejects_one_stalled_replica_even_when_another_progresses():
+def test_summary_retains_stalled_replica_and_excludes_it_from_latency():
     before = {"a": {"count": 100, "sum": 10}, "stalled": {"count": 100, "sum": 10}}
     after = {"a": {"count": 300, "sum": 50}, "stalled": {"count": 100, "sum": 10}}
-    with pytest.raises(ValueError, match="stalled"):
-        metrics.summarize(before, after, {"a": 2, "stalled": 2})
+    result = metrics.summarize(before, after, {"a": 2, "stalled": 2})
+    assert result['replica_tps_mean'] == 50
+    assert result['mean_latency_ms'] == 200
+    assert result['nodes'][1]['tps'] == 0
+    assert result['nodes'][1]['mean_latency_ms'] is None
+    assert result['all_nodes_progress'] is False
+
+
+def test_summary_reports_all_stalled_replicas_without_inventing_latency():
+    samples = {"0": {"count": 100, "sum": 10}, "1": {"count": 0, "sum": 0}}
+    result = metrics.summarize(samples, samples, {'0': 2, '1': 2})
+    assert result['replica_tps_mean'] == 0
+    assert result['mean_latency_ms'] is None
+    assert result['all_nodes_progress'] is False
+
+
+def test_summary_rejects_latency_growth_without_new_commits():
+    with pytest.raises(ValueError, match='latency'):
+        metrics.summarize({'a': {'count': 1, 'sum': 1}},
+                          {'a': {'count': 1, 'sum': 2}}, {'a': 2})
 
 
 @pytest.mark.parametrize("key", ["count", "sum"])

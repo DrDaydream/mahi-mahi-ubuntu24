@@ -35,6 +35,69 @@ use crate::{
 /// The maximum number of blocks that can be requested in a single message.
 pub const MAXIMUM_BLOCK_REQUEST: usize = 10;
 
+#[cfg(all(test, not(feature = "simulator")))]
+mod block_fetcher_tests {
+    use super::*;
+    use crate::{
+        block_handler::TestCommitHandler,
+        data::Data,
+        test_util::{committee_and_cores, test_metrics},
+        types::Dag,
+    };
+
+    async fn requests_for_missing_parents(enabled: bool) -> Option<NetworkMessage> {
+        let (committee, mut cores, _reporters) = committee_and_cores(4);
+        let mut core = cores.remove(0);
+        // These parents have not arrived; the child must remain pending until fetched.
+        core.add_blocks(vec![Data::new(Dag::draw_block("B2:[A1,B1,C1]"))]);
+        let metrics = test_metrics();
+        let observer: TestCommitHandler = TestCommitHandler::new(
+            committee.clone(),
+            core.block_handler().transaction_time.clone(),
+            metrics.clone(),
+            0,
+        );
+        let notify = Arc::new(Notify::new());
+        let block_store = core.block_store().clone();
+        let adversary = core.adversary();
+        let epoch_closing_time = core.epoch_closing_time();
+        let syncer = CoreThreadDispatcher::start(Syncer::new(
+            core, 5, notify.clone(), observer, metrics.clone(),
+        ));
+        let (stop, _stop_receiver) = mpsc::channel(1);
+        let (epoch_close_signal, _epoch_receiver) = mpsc::channel(1);
+        let inner = Arc::new(NetworkSyncerInner {
+            syncer, block_store, adversary, notify, committee, stop,
+            epoch_close_signal, epoch_closing_time,
+        });
+        let fetcher = BlockFetcher::start(0, inner.clone(), metrics, enabled);
+        let (sender, mut receiver) = mpsc::channel(4);
+        fetcher.register_authority(1, sender).await;
+        // Production cadence: first observation after 5s, request after 15s grace.
+        let message = tokio::time::timeout(Duration::from_secs(26), receiver.recv())
+            .await.ok().flatten();
+        fetcher.shutdown().await;
+        Arc::try_unwrap(inner).ok().expect("fetcher released inner state").syncer.stop();
+        message
+    }
+
+    #[tokio::test]
+    async fn enabled_synchronizer_requests_missing_parent_digests() {
+        let message = requests_for_missing_parents(true).await;
+        let Some(NetworkMessage::RequestBlocks(references)) = message else {
+            panic!("enabled synchronizer did not request the missing parents");
+        };
+        let expected = Dag::draw_block("B2:[A1,B1,C1]");
+        assert_eq!(references.len(), 3);
+        assert!(expected.includes().iter().all(|reference| references.contains(reference)));
+    }
+
+    #[tokio::test]
+    async fn disabled_synchronizer_does_not_request_missing_parents() {
+        assert!(requests_for_missing_parents(false).await.is_none());
+    }
+}
+
 pub struct NetworkSyncer<H: BlockHandler, C: CommitObserver> {
     inner: Arc<NetworkSyncerInner<H, C>>,
     main_task: JoinHandle<()>,
