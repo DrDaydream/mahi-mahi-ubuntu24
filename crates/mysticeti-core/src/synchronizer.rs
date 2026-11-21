@@ -315,7 +315,8 @@ where
 
     /// A simple and naive strategy that requests missing blocks from random peers.
     async fn sync_strategy(&mut self) {
-        if !self.enable {
+        // Preserve upstream 7c928c0 semantics, including its inverted flag.
+        if self.enable {
             return;
         }
 

@@ -85,7 +85,7 @@ A1 有限时间扣留 Byzantine 提议；A2 与 DAG 无关地分发两个版本�
 
 `target_authority` 必须在固定 Byzantine 集合里。`target_round` 如提供必须为正，并确实选出该身份（或未指定身份时的某个固定 Byzantine 身份）。开启 pipeline 后第 r 轮的 leaders 为 `(r + offset) % n`，其中 `offset=0..leaders-1`。只给身份时由策略选择符合条件的轮次；两者均为空时使用策略找到的最早合适目标。
 
-此实现使用已有 `round_robin` leader schedule，并未实现随机 common coin。A1–A5 只允许四轮或五轮 wave，默认五轮、四个 leaders。schedule 写入 run metadata，不增加 Rust 协议字段。适配器开启 pipeline，并记录设置。活动模式必须启用现有同步器，公共配置设置 `parameters.enable_synchronizer=true`。
+此实现使用已有 `round_robin` leader schedule，并未实现随机 common coin。A1–A5 只允许四轮或五轮 wave，默认五轮、四个 leaders。schedule 写入 run metadata，不增加 Rust 协议字段。适配器开启 pipeline，并记录设置。公共配置维持 `parameters.enable_synchronizer=true`；恢复上游后，这个值会跳过主动请求缺失父块的策略。
 
 攻击时间相对各节点 Core 初始化的本地单调时钟。Fabric 并行启动存在偏差，`run.json` 记录控制机观察的 `launch_spread_seconds`。测量 warmup 在所有运行节点就绪后开始，因此与节点攻击时间轴存在启动和就绪偏差；分析时对齐各节点日志，不能把相同毫秒设置当作全局同时启动。
 
@@ -93,9 +93,9 @@ A1 有限时间扣留 Byzantine 提议；A2 与 DAG 无关地分发两个版本�
 
 `results/run-*` 保留 `run.json`、`summary.json`、`summary.csv`、生成的配置、原始 Prometheus 快照及节点日志。run manifest 包含全部有效攻击参数、固定 Byzantine/崩溃身份、wave/leader 设置、同步器状态、源码来源及各二进制记录；summary 同时保存攻击参数。CSV 继续记录逐副本吞吐与延迟。攻击效果、额外版本、commit/skip/undecided 和恢复需要结合节点事件分析。
 
-测量结束后立即打印详细 `SUMMARY`，包括实验参数、敌手参数、全部活动副本与诚实副本的统计，以及逐节点 TPS、延迟和分叉区块输出比例；清理和日志下载结束后更新 `summary.txt` 的最终状态。零提交副本的 TPS 为 0、延迟为 `N/A`，平均延迟仅计算有提交的副本。全部零提交也会生成结果，不能将运行完成等同于协议保持进展。
+测量结束后立即打印详细 `SUMMARY`，包括实验参数、敌手参数、全部活动副本与诚实副本的统计，以及逐节点 TPS、E2E 和分叉区块输出比例；清理和日志下载结束后更新 `summary.txt` 的最终状态。native A0（包括 faults>0）采用上游终端累计统计，记录为零提交的副本在 E2E 算术平均中贡献 0，同时明确标记无观测。其余敌手模式的窗口差分仍把零提交延迟记为 `N/A`，只平均正提交副本。全部零提交也会生成结果，不能将运行完成等同于协议保持进展。
 
-A0 基线仍等待所有运行副本产生提交后开始预热。A1～A5 以节点进程存活且指标可采集作为就绪条件，以便测量从启动开始就零提交的攻击结果；进程退出、指标缺失等基础故障仍报错。二进制启动时发布真正的零值 shared 直方图，缺失数据不会被报告器伪装成零。
+所有模式以节点进程存活且指标可采集作为就绪条件，允许有效零输出；进程退出、指标缺失等基础故障仍报错。二进制启动时发布真正的零值 shared 直方图，缺失数据不会被报告器伪装成零。
 
 分叉比例采用“额外版本 / 全部非创世提交输出区块”：相同作者与轮次第一次输出一个摘要计普通输出，之后输出的其他摘要计额外分叉输出。分子、分母按同一测量窗口计算，区块须已进入最终提交 DAG；只生成或接收的分叉不计入。终端显示 `Committed blocks`、`Extra fork outputs`、`Fork output ratio`，JSON/CSV 保存 `committed_blocks`、`extra_fork_blocks`、`fork_output_ratio`（0～1）。零区块输出或旧二进制缺少计数器时为 `N/A`，详情见 [统计口径](../docs/adversary.md#fork-block-output-proportion)。TPS 仍是未按交易内容去重的提交条目速率。
 
@@ -106,7 +106,7 @@ cd /home/ubuntu/experiments/mahi-mahi-ubuntu24/aws
 python3 -m mahi_aws.report --latest
 ```
 
-本版修正 Rust 补块开关反向的问题，`enable_synchronizer=true` 会实际发送缺失父区块请求。需执行一次 `fab install` 编译这版二进制；之后只切换 A0～A5 不用重新安装。创建、安装、运行入口保持 `fab create → fab install → fab remote + 参数`。
+本版恢复上游补块开关的原始判断：`enable_synchronizer=true` 会跳过主动请求缺失父区块的策略。A3/A5 的敌手策略保留。native A0（包括 faults>0）采用上游终端累计 E2E/TPS 口径，其余敌手模式保留窗口差分；零输出允许完成，但缺失指标仍报错。需重新 `fab install` 编译二进制。详细边界、上游版本与新版工具包见 [上游协议说明](../docs/upstream-protocol.md)。
 
 离线 Python 检查不访问 AWS，也不编译 Rust。构建失败回归使用退出失败的假编译命令：
 

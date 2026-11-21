@@ -189,7 +189,7 @@ def test_run_failure_retains_logs_and_status(monkeypatch, tmp_path, capsys):
     stopped = []
     monkeypatch.setattr(runner, '_stop', lambda _: stopped.append(True) or [])
     monkeypatch.setattr(runner, '_configure_and_start', lambda *args: None)
-    monkeypatch.setattr(runner, '_wait_ready', lambda *args: (_ for _ in ()).throw(RuntimeError('stalled authority 2')))
+    monkeypatch.setattr(runner, '_wait_ready', lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError('stalled authority 2')))
     def download_after_diagnostics(*args):
         output = capsys.readouterr().out
         assert 'SUMMARY' in output and 'stalled authority 2' in output
@@ -244,7 +244,8 @@ def test_report_output_interruption_still_stops_nodes_and_collects_logs(monkeypa
 
 
 @pytest.mark.parametrize('stalled', [[], [0], [0, 1, 2, 3]])
-def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path, capsys, stalled):
+@pytest.mark.parametrize('mode,faults', [('A0', 0), ('A0', 1), ('A3', 0), ('A5', 0)])
+def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path, capsys, stalled, mode, faults):
     import hashlib
     import threading
     from mahi_aws.settings import REPOSITORY, RUSTFLAGS, RUST_TOOLCHAIN
@@ -281,6 +282,7 @@ def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path, 
                     return SimpleNamespace(stdout=(
                         f'latency_s_count{{workload="shared"}} {count*100}\n'
                         f'latency_s_sum{{workload="shared"}} {count*20}\n'
+                        f'benchmark_duration {i*5}\n'
                         f'committed_blocks_total{{kind="first"}} {count*10}\n'
                         f'committed_blocks_total{{kind="extra_fork"}} {count*2}\n'))
             return SimpleNamespace(stdout=json.dumps(build))
@@ -300,20 +302,24 @@ def test_remote_prebuilt_integration_and_replica_summary(monkeypatch, tmp_path, 
         assert 'SUMMARY' in capsys.readouterr().out
         return download_logs(*args)
     monkeypatch.setattr(runner, '_download_logs', download_with_visible_report)
-    attack = {'mode': 'A3', 'duration_ms': 100, 'start_after_ms': 0, 'delay_ms': 1, 'late_delay_ms': 1}
-    runner.remote(dict(settings['benchmark'], nodes=4, rate=1000, duration=1, warmup=0,
+    attack = {'mode': mode, 'duration_ms': 100, 'start_after_ms': 0, 'delay_ms': 1, 'late_delay_ms': 1}
+    runner.remote(dict(settings['benchmark'], nodes=4, rate=1000, duration=1, warmup=0, faults=faults,
                        scrape_interval=1, adversary=attack))
     summary = json.loads(next((tmp_path/'results').glob('*/summary.json')).read_text())
-    assert summary['mean_latency_ms'] == (None if len(stalled) == 4 else pytest.approx(200))
-    assert len(summary['nodes']) == 4
-    assert summary['replica_tps_mean'] == pytest.approx(sum(n['tps'] for n in summary['nodes'])/4)
-    assert summary['load']['effective_total_tps'] == 1000
+    active_count = 4 - faults
+    positive = active_count - len(set(stalled).intersection(range(active_count)))
+    expected = 200 * positive / active_count if mode == 'A0' else (200 if positive else None)
+    assert summary['mean_latency_ms'] == (pytest.approx(expected) if expected is not None else None)
+    assert len(summary['nodes']) == active_count
+    assert summary['replica_tps_mean'] == pytest.approx(sum(n['tps'] for n in summary['nodes'])/active_count)
+    assert summary['load']['effective_total_tps'] == 250 * active_count
     assert summary['all_nodes_progress'] is (not stalled)
-    assert summary['fork_output_ratio_mean'] == (None if len(stalled) == 4 else pytest.approx(1/6))
-    assert summary['fork_ratio_contributors'] == 4 - len(stalled)
+    assert summary['fork_output_ratio_mean'] == (pytest.approx(1/6) if positive else None)
+    assert summary['fork_ratio_contributors'] == positive
+    assert summary['measurement_basis'] == ('upstream-terminal-cumulative-v1' if mode == 'A0' else 'window-delta-v1')
     saved_text = next((tmp_path/'results').glob('*/summary.txt')).read_text(encoding='utf-8')
     assert 'MAHI-MAHI AWS' in saved_text and 'Status: complete' in saved_text
-    assert len(list((tmp_path/'results').glob('*/logs/node-*.log'))) == 4
+    assert len(list((tmp_path/'results').glob('*/logs/node-*.log'))) == active_count
     assert all(not any(word in command.split() for word in ('cargo', 'git', 'apt-get', 'rustup')) for command in commands)
 
 

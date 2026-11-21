@@ -100,10 +100,12 @@ measurement still produces a report. TPS remains the raw shared transaction-entr
 rate, without deduplication of transaction payloads across forks. The fork-block
 ratio does not mathematically correct this TPS into unique-transaction goodput.
 
-`enable_synchronizer=true` now enables actual missing-parent requests. The
-previous inverted Rust check disabled fetching when this setting was true. The
-fix requires rebuilding through `fab install`; A0 comparisons should use the
-same corrected binary as the attack runs.
+The upstream-aligned release restores the original inverted flag semantics:
+`enable_synchronizer=true` skips active missing-parent requests. This applies to
+every mode; the A3/A5 strategy code remains unchanged. Rebuild with `fab install`.
+Native A0 (including crash faults) now uses cumulative upstream terminal statistics;
+the window/zero-latency rules above continue to apply to native A1-A5. See
+[upstream protocol and statistics](upstream-protocol.md) for the exact boundaries.
 
 See [validation record](adversary-validation.md) for the executed tests, node/test
 compilation checks and six core-test failures also reproduced on the unchanged

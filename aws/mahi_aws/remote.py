@@ -18,7 +18,7 @@ import yaml
 
 from .build import verification_script, verify_build
 from .cloud import Cloud
-from .metrics import parse_snapshot, summarize
+from .metrics import parse_snapshot, summarize_run, UPSTREAM_BASIS, WINDOW_BASIS
 from .report import format_summary
 from .settings import ADVERSARY_DEFAULTS, load_allocation, validate_benchmark
 from .source import resolve_source
@@ -302,6 +302,7 @@ class Runner:
         active = list(enumerate(hosts[:len(hosts) - parameters['faults']]))
         allocation = load_allocation(parameters['rate'], len(hosts), parameters['faults'])
         record = {'run_id': run_id, 'commit': self.provenance.get('commit'), 'source': self.provenance, 'status': 'starting', 'parameters': parameters,
+                  'measurement_basis': UPSTREAM_BASIS if parameters['adversary']['mode'] == 'A0' else WINDOW_BASIS,
                   'load': allocation, 'builds': getattr(self, 'installed', []),
                   'controller_build': getattr(self, 'controller_build', None),
                   'adversary': parameters['adversary'],
@@ -320,7 +321,9 @@ class Runner:
             if previous_errors:
                 raise RuntimeError('Could not stop a previous experiment: ' + '\n'.join(previous_errors))
             self._configure_and_start(hosts, parameters, directory, remote_directory)
-            self._wait_ready(active, len(hosts), parameters['adversary']['mode'] == 'A0')
+            # Valid zero output is allowed. Readiness requires live processes and
+            # actual shared counters; it does not wait for a first commit.
+            self._wait_ready(active, len(hosts), require_commits=False)
             print(f'All active nodes ready. Warming up for {parameters["warmup"]}s...', flush=True)
             deadline = time.monotonic() + parameters['warmup']
             record['launch_spread_seconds'] = getattr(self, 'launch_completed', deadline) - getattr(self, 'launch_started', deadline)
@@ -342,8 +345,9 @@ class Runner:
                 if finished:
                     break
             elapsed = {index: after[index]['monotonic'] - before[index]['monotonic'] for index in before}
-            summary = summarize({i: s['metrics'] for i, s in before.items()},
-                                {i: s['metrics'] for i, s in after.items()}, elapsed)
+            summary = summarize_run({i: s['metrics'] for i, s in before.items()},
+                                    {i: s['metrics'] for i, s in after.items()}, elapsed,
+                                    record['measurement_basis'])
             summary.update(load=allocation, commit=self.provenance.get('commit'), run_id=run_id,
                            adversary=parameters['adversary'], crashed_authorities=record['crashed_authorities'],
                            enable_synchronizer=parameters['enable_synchronizer'])

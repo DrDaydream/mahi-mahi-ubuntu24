@@ -82,10 +82,10 @@ mod block_fetcher_tests {
     }
 
     #[tokio::test]
-    async fn enabled_synchronizer_requests_missing_parent_digests() {
-        let message = requests_for_missing_parents(true).await;
+    async fn upstream_synchronizer_false_requests_missing_parent_digests() {
+        let message = requests_for_missing_parents(false).await;
         let Some(NetworkMessage::RequestBlocks(references)) = message else {
-            panic!("enabled synchronizer did not request the missing parents");
+            panic!("upstream synchronizer with enable=false did not request missing parents");
         };
         let expected = Dag::draw_block("B2:[A1,B1,C1]");
         assert_eq!(references.len(), 3);
@@ -93,8 +93,8 @@ mod block_fetcher_tests {
     }
 
     #[tokio::test]
-    async fn disabled_synchronizer_does_not_request_missing_parents() {
-        assert!(requests_for_missing_parents(false).await.is_none());
+    async fn upstream_synchronizer_true_does_not_request_missing_parents() {
+        assert!(requests_for_missing_parents(true).await.is_none());
     }
 }
 

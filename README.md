@@ -11,6 +11,8 @@
 
 协议源码在 `crates/`，原说明在 [UPSTREAM_README.md](UPSTREAM_README.md)，来源记录在 [UPSTREAM.json](UPSTREAM.json)。本仓库不是生产 Sui 部署。
 
+正常协议恢复到上述上游基线，保留实验敌手和观测接入。A0/native crash A1 的累计统计、A3/A5 保留范围及新版矩阵工具包见 [上游协议与实验口径](docs/upstream-protocol.md)。
+
 ## 源码目录修复
 
 部署工具和实际编译的源码目录分开：
